@@ -23,12 +23,12 @@
 #ifndef __NETHOGS_H
 #define __NETHOGS_H
 
-#include <netinet/in.h>
-#include <sys/types.h>
-#include <sys/socket.h>
 #include <arpa/inet.h>
 #include <cassert>
 #include <cstring>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/types.h>
 #ifdef __APPLE__
 #include <sys/malloc.h>
 #elif __FreeBSD__
@@ -63,11 +63,15 @@
 #define PROGNAME_WIDTH 512
 
 // viewMode: how to represent numbers
-#define VIEWMODE_KBPS 0
-#define VIEWMODE_TOTAL_KB 1
-#define VIEWMODE_TOTAL_B 2
-#define VIEWMODE_TOTAL_MB 3
-#define VIEWMODE_COUNT 4
+enum {
+  VIEWMODE_KBPS,
+  VIEWMODE_TOTAL_KB,
+  VIEWMODE_TOTAL_B,
+  VIEWMODE_TOTAL_MB,
+  VIEWMODE_MBPS,
+  VIEWMODE_GBPS,
+  VIEWMODE_COUNT
+};
 
 #define NORETURN __attribute__((__noreturn__))
 

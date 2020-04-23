@@ -20,19 +20,19 @@
  *
  */
 
-#include <sys/types.h>
+#include "decpcap.h"
 #include <net/ethernet.h>
 #include <net/if.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
 #include <netinet/tcp.h>
-#include <string.h> // for memcpy
 #include <pcap.h>
-#include "decpcap.h"
+#include <string.h> // for memcpy
+#include <sys/types.h>
 
 #define DP_DEBUG 0
-
+bool catchall = false;
 /* functions to set up a handle (which is basically just a pcap handle) */
 
 struct dp_handle *dp_fillhandle(pcap_t *phandle) {
@@ -77,11 +77,34 @@ struct dp_handle *dp_open_offline(char *fname, char *ebuf) {
 }
 
 struct dp_handle *dp_open_live(const char *device, int snaplen, int promisc,
-                               int to_ms, char *errbuf) {
+                               int to_ms, char *filter, char *errbuf) {
+  struct bpf_program fp; // compiled filter program
+  bpf_u_int32 maskp;     // subnet mask
+  bpf_u_int32 netp;      // interface IP
+
   pcap_t *temp = pcap_open_live(device, snaplen, promisc, to_ms, errbuf);
 
   if (temp == NULL) {
     return NULL;
+  }
+
+  if (filter != NULL) {
+    pcap_lookupnet(device, &netp, &maskp, errbuf);
+
+    /* Compile the filter */
+    if (pcap_compile(temp, &fp, filter, 1, netp) == -1) {
+      fprintf(stderr,
+              "Error calling pcap_compile for filter on device %s: %s\n",
+              device, pcap_geterr(temp));
+      return NULL;
+    }
+
+    /* set the filter */
+    if (pcap_setfilter(temp, &fp) == -1) {
+      fprintf(stderr, "Error setting capture filter on device %s: %s\n", device,
+              pcap_geterr(temp));
+      return NULL;
+    }
   }
 
   return dp_fillhandle(temp);
@@ -110,6 +133,18 @@ void dp_parse_tcp(struct dp_handle *handle, const dp_header *header,
   // TODO: maybe `pass on' payload to lower-level protocol parsing
 }
 
+void dp_parse_udp(struct dp_handle *handle, const dp_header *header,
+                  const u_char *packet) {
+
+  if (handle->callback[dp_packet_udp] != NULL) {
+    int done =
+        (handle->callback[dp_packet_udp])(handle->userdata, header, packet);
+    if (done)
+      return;
+  }
+  // TODO: maybe `pass on' payload to lower-level protocol parsing
+}
+
 void dp_parse_ip(struct dp_handle *handle, const dp_header *header,
                  const u_char *packet) {
   const struct ip *ip = (struct ip *)packet;
@@ -127,6 +162,10 @@ void dp_parse_ip(struct dp_handle *handle, const dp_header *header,
   switch (ip->ip_p) {
   case IPPROTO_TCP:
     dp_parse_tcp(handle, header, payload);
+    break;
+  case IPPROTO_UDP:
+    if (catchall)
+      dp_parse_udp(handle, header, payload);
     break;
   default:
     // TODO: maybe support for non-tcp IP packets
@@ -148,6 +187,10 @@ void dp_parse_ip6(struct dp_handle *handle, const dp_header *header,
   switch ((ip6->ip6_ctlun).ip6_un1.ip6_un1_nxt) {
   case IPPROTO_TCP:
     dp_parse_tcp(handle, header, payload);
+    break;
+  case IPPROTO_UDP:
+    if (catchall)
+      dp_parse_udp(handle, header, payload);
     break;
   default:
     // TODO: maybe support for non-tcp ipv6 packets

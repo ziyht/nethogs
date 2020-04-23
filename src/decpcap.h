@@ -22,12 +22,13 @@
 #ifndef __DECPCAP_H
 #define __DECPCAP_H
 
-#include <stdlib.h>
-#include <stdio.h>
 #include <pcap.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 #define DP_ERRBUF_SIZE PCAP_ERRBUF_SIZE
-
+extern bool catchall;
 /* definitions */
 
 enum dp_packet_type {
@@ -65,7 +66,7 @@ struct dp_handle {
 /* functions to set up a handle (which is basically just a pcap handle) */
 
 struct dp_handle *dp_open_live(const char *device, int snaplen, int promisc,
-                               int to_ms, char *errbuf);
+                               int to_ms, char *filter, char *errbuf);
 struct dp_handle *dp_open_offline(char *fname, char *ebuf);
 
 /* functions to add callbacks */

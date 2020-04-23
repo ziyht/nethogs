@@ -20,8 +20,8 @@
  *
  */
 
-#include <iostream>
 #include <cassert>
+#include <iostream>
 #ifdef __APPLE__
 #include <sys/malloc.h>
 #elif __FreeBSD__
@@ -29,11 +29,12 @@
 #else
 #include <malloc.h>
 #endif
-#include "nethogs.h"
 #include "connection.h"
+#include "nethogs.h"
 #include "process.h"
 
 ConnList *connections = NULL;
+extern Process *unknownudp;
 
 void PackList::add(Packet *p) {
   if (content == NULL) {
@@ -51,8 +52,8 @@ void PackList::add(Packet *p) {
 }
 
 /* sums up the total bytes used and removes 'old' packets */
-u_int32_t PackList::sumanddel(timeval t) {
-  u_int32_t retval = 0;
+u_int64_t PackList::sumanddel(timeval t) {
+  u_int64_t retval = 0;
   PackListNode *current = content;
   PackListNode *previous = NULL;
 
@@ -151,10 +152,23 @@ void Connection::add(Packet *packet) {
   }
 }
 
-Connection *findConnectionWithMatchingSource(Packet *packet) {
+Connection *findConnectionWithMatchingSource(Packet *packet,
+                                             short int packettype) {
   assert(packet->Outgoing());
 
-  ConnList *current = connections;
+  ConnList *current = NULL;
+  switch (packettype) {
+  case IPPROTO_TCP: {
+    current = connections;
+    break;
+  }
+
+  case IPPROTO_UDP: {
+    current = unknownudp->connections;
+    break;
+  }
+  }
+
   while (current != NULL) {
     /* the reference packet is always outgoing */
     if (packet->matchSource(current->getVal()->refpacket)) {
@@ -163,20 +177,35 @@ Connection *findConnectionWithMatchingSource(Packet *packet) {
 
     current = current->getNext();
   }
+
   return NULL;
 }
 
-Connection *findConnectionWithMatchingRefpacketOrSource(Packet *packet) {
-  ConnList *current = connections;
+Connection *findConnectionWithMatchingRefpacketOrSource(Packet *packet,
+                                                        short int packettype) {
+
+  ConnList *current = NULL;
+  switch (packettype) {
+  case IPPROTO_TCP: {
+    current = connections;
+    break;
+  }
+
+  case IPPROTO_UDP: {
+    current = unknownudp->connections;
+    break;
+  }
+  }
+
   while (current != NULL) {
     /* the reference packet is always *outgoing* */
     if (packet->match(current->getVal()->refpacket)) {
       return current->getVal();
     }
-
     current = current->getNext();
   }
-  return findConnectionWithMatchingSource(packet);
+
+  return findConnectionWithMatchingSource(packet, packettype);
 }
 
 /*
@@ -184,13 +213,13 @@ Connection *findConnectionWithMatchingRefpacketOrSource(Packet *packet) {
  * a packet belongs to a connection if it matches
  * to its reference packet
  */
-Connection *findConnection(Packet *packet) {
+Connection *findConnection(Packet *packet, short int packettype) {
   if (packet->Outgoing())
-    return findConnectionWithMatchingRefpacketOrSource(packet);
+    return findConnectionWithMatchingRefpacketOrSource(packet, packettype);
   else {
     Packet *invertedPacket = packet->newInverted();
     Connection *result =
-        findConnectionWithMatchingRefpacketOrSource(invertedPacket);
+        findConnectionWithMatchingRefpacketOrSource(invertedPacket, packettype);
 
     delete invertedPacket;
     return result;
@@ -206,7 +235,7 @@ Connection *findConnection(Packet *packet) {
  * Returns sum of sent packages (by address)
  *	   sum of received packages (by address)
  */
-void Connection::sumanddel(timeval t, u_int32_t *recv, u_int32_t *sent) {
+void Connection::sumanddel(timeval t, u_int64_t *recv, u_int64_t *sent) {
   (*sent) = (*recv) = 0;
 
   *sent = sent_packets->sumanddel(t);

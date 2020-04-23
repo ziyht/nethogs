@@ -21,27 +21,27 @@
  */
 
 #include <iostream>
-#include <strings.h>
-#include <string>
 #include <ncurses.h>
+#include <string>
+#include <strings.h>
 #if !defined(__APPLE__) && !defined(__FreeBSD__)
 #include <asm/types.h>
 #endif
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <stdlib.h>
-#include <pwd.h>
 #include <map>
+#include <pwd.h>
+#include <stdlib.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 
-#include "process.h"
-#include "nethogs.h"
-#include "inode2prog.h"
 #include "conninode.h"
+#include "inode2prog.h"
+#include "nethogs.h"
+#include "process.h"
 
 extern timeval curtime;
-
+extern bool catchall;
 /*
  * connection-inode table. takes information from /proc/net/tcp.
  * key contains source ip, source port, destination ip, destination
@@ -65,18 +65,27 @@ Process *unknownudp;
 Process *unknownip;
 ProcList *processes;
 
-float tomb(u_int32_t bytes) { return ((double)bytes) / 1024 / 1024; }
-float tokb(u_int32_t bytes) { return ((double)bytes) / 1024; }
+#define KB (1UL << 10)
+#define MB (1UL << 20)
+#define GB (1UL << 30)
 
-float tokbps(u_int32_t bytes) { return (((double)bytes) / PERIOD) / 1024; }
+float tomb(u_int64_t bytes) { return ((double)bytes) / MB; }
+float tokb(u_int64_t bytes) { return ((double)bytes) / KB; }
+
+float tokbps(u_int64_t bytes) { return (((double)bytes) / PERIOD) / KB; }
+float tombps(u_int64_t bytes) { return (((double)bytes) / PERIOD) / MB; }
+float togbps(u_int64_t bytes) { return (((double)bytes) / PERIOD) / GB; }
 
 void process_init() {
   unknowntcp = new Process(0, "", "unknown TCP");
-  // unknownudp = new Process (0, "", "unknown UDP");
-  // unknownip = new Process (0, "", "unknown IP");
   processes = new ProcList(unknowntcp, NULL);
-  // processes = new ProcList (unknownudp, processes);
-  // processes = new ProcList (unknownip, processes);
+
+  if (catchall) {
+    unknownudp = new Process(0, "", "unknown UDP");
+    processes = new ProcList(unknownudp, processes);
+    // unknownip = new Process (0, "", "unknown IP");
+    // processes = new ProcList (unknownip, processes);
+  }
 }
 
 int Process::getLastPacket() {
@@ -92,28 +101,30 @@ int Process::getLastPacket() {
   return lastpacket;
 }
 
-/** Get the kb/s values for this process */
-void Process::getkbps(float *recvd, float *sent) {
-  u_int32_t sum_sent = 0, sum_recv = 0;
-
-  /* walk though all this process's connections, and sum
+/** get total values for this process for only active connections */
+static void sum_active_connections(Process *process_ptr, u_int64_t &sum_sent,
+                                   u_int64_t &sum_recv) {
+  /* walk though all process_ptr process's connections, and sum
    * them up */
-  ConnList *curconn = this->connections;
+  ConnList *curconn = process_ptr->connections;
   ConnList *previous = NULL;
   while (curconn != NULL) {
     if (curconn->getVal()->getLastPacket() <= curtime.tv_sec - CONNTIMEOUT) {
+      /* capture sent and received totals before deleting */
+      process_ptr->sent_by_closed_bytes += curconn->getVal()->sumSent;
+      process_ptr->rcvd_by_closed_bytes += curconn->getVal()->sumRecv;
       /* stalled connection, remove. */
       ConnList *todelete = curconn;
       Connection *conn_todelete = curconn->getVal();
       curconn = curconn->getNext();
-      if (todelete == this->connections)
-        this->connections = curconn;
+      if (todelete == process_ptr->connections)
+        process_ptr->connections = curconn;
       if (previous != NULL)
         previous->setNext(curconn);
       delete (todelete);
       delete (conn_todelete);
     } else {
-      u_int32_t sent = 0, recv = 0;
+      u_int64_t sent = 0, recv = 0;
       curconn->getVal()->sumanddel(curtime, &recv, &sent);
       sum_sent += sent;
       sum_recv += recv;
@@ -121,13 +132,38 @@ void Process::getkbps(float *recvd, float *sent) {
       curconn = curconn->getNext();
     }
   }
+}
+
+/** Get the kb/s values for this process */
+void Process::getkbps(float *recvd, float *sent) {
+  u_int64_t sum_sent = 0, sum_recv = 0;
+
+  sum_active_connections(this, sum_sent, sum_recv);
   *recvd = tokbps(sum_recv);
   *sent = tokbps(sum_sent);
 }
 
+/** Get the mb/s values for this process */
+void Process::getmbps(float *recvd, float *sent) {
+  u_int64_t sum_sent = 0, sum_recv = 0;
+
+  sum_active_connections(this, sum_sent, sum_recv);
+  *recvd = tombps(sum_recv);
+  *sent = tombps(sum_sent);
+}
+
+/** Get the gb/s values for this process */
+void Process::getgbps(float *recvd, float *sent) {
+  u_int64_t sum_sent = 0, sum_recv = 0;
+
+  sum_active_connections(this, sum_sent, sum_recv);
+  *recvd = togbps(sum_recv);
+  *sent = togbps(sum_sent);
+}
+
 /** get total values for this process */
-void Process::gettotal(u_int32_t *recvd, u_int32_t *sent) {
-  u_int32_t sum_sent = 0, sum_recv = 0;
+void Process::gettotal(u_int64_t *recvd, u_int64_t *sent) {
+  u_int64_t sum_sent = 0, sum_recv = 0;
   ConnList *curconn = this->connections;
   while (curconn != NULL) {
     Connection *conn = curconn->getVal();
@@ -137,12 +173,12 @@ void Process::gettotal(u_int32_t *recvd, u_int32_t *sent) {
   }
   // std::cout << "Sum sent: " << sum_sent << std::endl;
   // std::cout << "Sum recv: " << sum_recv << std::endl;
-  *recvd = sum_recv;
-  *sent = sum_sent;
+  *recvd = sum_recv + this->rcvd_by_closed_bytes;
+  *sent = sum_sent + this->sent_by_closed_bytes;
 }
 
 void Process::gettotalmb(float *recvd, float *sent) {
-  u_int32_t sum_sent = 0, sum_recv = 0;
+  u_int64_t sum_sent = 0, sum_recv = 0;
   gettotal(&sum_recv, &sum_sent);
   *recvd = tomb(sum_recv);
   *sent = tomb(sum_sent);
@@ -150,14 +186,14 @@ void Process::gettotalmb(float *recvd, float *sent) {
 
 /** get total values for this process */
 void Process::gettotalkb(float *recvd, float *sent) {
-  u_int32_t sum_sent = 0, sum_recv = 0;
+  u_int64_t sum_sent = 0, sum_recv = 0;
   gettotal(&sum_recv, &sum_sent);
   *recvd = tokb(sum_recv);
   *sent = tokb(sum_sent);
 }
 
 void Process::gettotalb(float *recvd, float *sent) {
-  u_int32_t sum_sent = 0, sum_recv = 0;
+  u_int64_t sum_sent = 0, sum_recv = 0;
   gettotal(&sum_recv, &sum_sent);
   // std::cout << "Total sent: " << sum_sent << std::endl;
   *sent = sum_sent;
@@ -277,8 +313,8 @@ Process *getProcess(Connection *connection, const char *devicename) {
     // no? refresh and check conn/inode table
     if (bughuntmode) {
       std::cout << "?  new connection not in connection-to-inode table before "
-                   "refresh, hash " << connection->refpacket->gethashstring()
-                << std::endl;
+                   "refresh, hash "
+                << connection->refpacket->gethashstring() << std::endl;
     }
 // refresh the inode->pid table first. Presumably processing the renewed
 // connection->inode table
@@ -354,7 +390,8 @@ void procclean() {
 void remove_timed_out_processes() {
   ProcList *previousproc = NULL;
 
-  for (ProcList *curproc = processes; curproc != NULL; curproc = curproc->next) {
+  for (ProcList *curproc = processes; curproc != NULL;
+       curproc = curproc->next) {
     if ((curproc->getVal()->getLastPacket() + PROCESSTIMEOUT <=
          curtime.tv_sec) &&
         (curproc->getVal() != unknowntcp) &&

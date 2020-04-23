@@ -23,9 +23,9 @@
 #ifndef __PROCESS_H
 #define __PROCESS_H
 
-#include <cassert>
-#include "nethogs.h"
 #include "connection.h"
+#include "nethogs.h"
+#include <cassert>
 
 extern bool tracemode;
 extern bool bughuntmode;
@@ -78,6 +78,8 @@ public:
     connections = NULL;
     pid = 0;
     uid = 0;
+    sent_by_closed_bytes = 0;
+    rcvd_by_closed_bytes = 0;
   }
   void check() { assert(pid >= 0); }
 
@@ -89,8 +91,10 @@ public:
   }
   int getLastPacket();
 
-  void gettotal(u_int32_t *recvd, u_int32_t *sent);
+  void gettotal(u_int64_t *recvd, u_int64_t *sent);
   void getkbps(float *recvd, float *sent);
+  void getmbps(float *recvd, float *sent);
+  void getgbps(float *recvd, float *sent);
   void gettotalmb(float *recvd, float *sent);
   void gettotalkb(float *recvd, float *sent);
   void gettotalb(float *recvd, float *sent);
@@ -99,6 +103,8 @@ public:
   char *cmdline;
   const char *devicename;
   int pid;
+  u_int64_t sent_by_closed_bytes;
+  u_int64_t rcvd_by_closed_bytes;
 
   ConnList *connections;
   uid_t getUid() { return uid; }

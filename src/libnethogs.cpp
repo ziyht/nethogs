@@ -3,13 +3,13 @@ extern "C" {
 }
 
 #include "nethogs.cpp"
-#include <iostream>
-#include <memory>
-#include <map>
-#include <vector>
 #include <cstring>
-#include <fcntl.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <iostream>
+#include <map>
+#include <memory>
+#include <vector>
 
 //////////////////////////////
 extern ProcList *processes;
@@ -72,10 +72,11 @@ static bool wait_for_next_trigger() {
   return true;
 }
 
-static int nethogsmonitor_init() {
+static int nethogsmonitor_init(int devc, char **devicenames, bool all,
+                               char *filter, int to_ms) {
   process_init();
 
-  device *devices = get_default_devices();
+  device *devices = get_devices(devc, devicenames, all);
   if (devices == NULL) {
     std::cerr << "No devices to monitor" << std::endl;
     return NETHOGS_STATUS_NO_DEVICE;
@@ -99,8 +100,8 @@ static int nethogsmonitor_init() {
     }
 
     char errbuf[PCAP_ERRBUF_SIZE];
-    dp_handle *newhandle =
-        dp_open_live(current_dev->name, BUFSIZ, promiscuous, 100, errbuf);
+    dp_handle *newhandle = dp_open_live(current_dev->name, BUFSIZ, promiscuous,
+                                        to_ms, filter, errbuf);
     if (newhandle != NULL) {
       dp_addcb(newhandle, dp_packet_ip, process_ip);
       dp_addcb(newhandle, dp_packet_ip6, process_ip6);
@@ -204,8 +205,8 @@ static void nethogsmonitor_handle_update(NethogsMonitorCallback cb) {
       // continue;
     } else {
       const u_int32_t uid = curproc->getVal()->getUid();
-      u_int32_t sent_bytes;
-      u_int32_t recv_bytes;
+      u_int64_t sent_bytes;
+      u_int64_t recv_bytes;
       float sent_kbs;
       float recv_kbs;
       curproc->getVal()->getkbps(&recv_kbs, &sent_kbs);
@@ -257,10 +258,14 @@ static void nethogsmonitor_handle_update(NethogsMonitorCallback cb) {
 static void nethogsmonitor_clean_up() {
   // clean up
   handle *current_handle = handles;
+  handle *rem;
   while (current_handle != NULL) {
     pcap_close(current_handle->content->pcap_handle);
+    rem = current_handle;
     current_handle = current_handle->next;
+    free(rem);
   }
+  handles = NULL;
 
   // close file descriptors
   for (std::vector<int>::const_iterator it = pc_loop_fd_list.begin();
@@ -271,12 +276,17 @@ static void nethogsmonitor_clean_up() {
   procclean();
 }
 
-int nethogsmonitor_loop(NethogsMonitorCallback cb) {
+int nethogsmonitor_loop(NethogsMonitorCallback cb, char *filter, int to_ms) {
+    return nethogsmonitor_loop_devices(cb, filter, 0, NULL, false, to_ms);
+}
+
+int nethogsmonitor_loop_devices(NethogsMonitorCallback cb, char *filter,
+                                int devc, char **devicenames, bool all, int to_ms) {
   if (monitor_run_flag) {
     return NETHOGS_STATUS_FAILURE;
   }
 
-  int return_value = nethogsmonitor_init();
+  int return_value = nethogsmonitor_init(devc, devicenames, all, filter, to_ms);
   if (return_value != NETHOGS_STATUS_OK) {
     return return_value;
   }

@@ -3,11 +3,11 @@
 #include <vector>
 
 #ifdef __linux__
+#include <linux/capability.h>
 #include <linux/limits.h>
-#include <unistd.h>
 #include <sys/types.h>
 #include <sys/xattr.h>
-#include <linux/capability.h>
+#include <unistd.h>
 #endif
 
 // The self_pipe is used to interrupt the select() in the main loop
@@ -27,14 +27,15 @@ static void help(bool iserror) {
   // output << "usage: nethogs [-V] [-b] [-d seconds] [-t] [-p] [-f (eth|ppp))]
   // [device [device [device ...]]]\n";
   output << "usage: nethogs [-V] [-h] [-b] [-d seconds] [-v mode] [-c count] "
-            "[-t] [-p] [-s] [-a] [-l] [device [device [device ...]]]\n";
+            "[-t] [-p] [-s] [-a] [-l] [-f filter] [-C]"
+            "[device [device [device ...]]]\n";
   output << "		-V : prints version.\n";
   output << "		-h : prints this help.\n";
   output << "		-b : bughunt mode - implies tracemode.\n";
   output << "		-d : delay for update refresh rate in seconds. default "
             "is 1.\n";
   output << "		-v : view mode (0 = KB/s, 1 = total KB, 2 = total B, 3 "
-            "= total MB). default is 0.\n";
+            "= total MB, 4 = MB/s, 5 = GB/s). default is 0.\n";
   output << "		-c : number of updates. default is 0 (unlimited).\n";
   output << "		-t : tracemode.\n";
   // output << "		-f : format of packets on interface, default is
@@ -42,7 +43,12 @@ static void help(bool iserror) {
   output << "		-p : sniff in promiscious mode (not recommended).\n";
   output << "		-s : sort output by sent column.\n";
   output << "		-l : display command line.\n";
-  output << "		-a : monitor all devices, even loopback/stopped ones.\n";
+  output << "		-a : monitor all devices, even loopback/stopped "
+            "ones.\n";
+  output << "		-C : capture TCP and UDP.\n";
+  output << "		-f : EXPERIMENTAL: specify string pcap filter (like "
+            "tcpdump)."
+            " This may be removed or changed in a future version.\n";
   output << "		device : device(s) to monitor. default is all "
             "interfaces up and running excluding loopback\n";
   output << std::endl;
@@ -51,7 +57,8 @@ static void help(bool iserror) {
   output << " s: sort by SENT traffic\n";
   output << " r: sort by RECEIVE traffic\n";
   output << " l: display command line\n";
-  output << " m: switch between total (KB, B, MB) and KB/s mode\n";
+  output << " m: switch between total (KB, B, MB) and throughput (KB/s, MB/s, "
+            "GB/s) mode\n";
 }
 
 void quit_cb(int /* i */) {
@@ -129,13 +136,13 @@ void clean_up() {
 }
 
 int main(int argc, char **argv) {
-  process_init();
 
   int promisc = 0;
   bool all = false;
+  char *filter = NULL;
 
   int opt;
-  while ((opt = getopt(argc, argv, "Vhbtpsd:v:c:la")) != -1) {
+  while ((opt = getopt(argc, argv, "Vhbtpsd:v:c:laf:C")) != -1) {
     switch (opt) {
     case 'V':
       versiondisplay();
@@ -157,7 +164,7 @@ int main(int argc, char **argv) {
       sortRecv = false;
       break;
     case 'd':
-      refreshdelay = (time_t) atoi(optarg);
+      refreshdelay = (time_t)atoi(optarg);
       break;
     case 'v':
       viewMode = atoi(optarg) % VIEWMODE_COUNT;
@@ -171,12 +178,19 @@ int main(int argc, char **argv) {
     case 'a':
       all = true;
       break;
+    case 'f':
+      filter = optarg;
+      break;
+    case 'C':
+      catchall = true;
+      break;
     default:
       help(true);
       exit(EXIT_FAILURE);
     }
   }
 
+  process_init();
   device *devices = get_devices(argc - optind, argv + optind, all);
   if (devices == NULL)
     forceExit(false, "No devices to monitor. Use '-a' to allow monitoring "
@@ -190,7 +204,7 @@ int main(int argc, char **argv) {
 #ifdef __linux__
     char exe_path[PATH_MAX];
     ssize_t len;
-    unsigned int caps[5] = {0,0,0,0,0};
+    unsigned int caps[5] = {0, 0, 0, 0, 0};
 
     if ((len = readlink("/proc/self/exe", exe_path, PATH_MAX)) == -1)
       forceExit(false, "Failed to locate nethogs binary.");
@@ -198,8 +212,11 @@ int main(int argc, char **argv) {
 
     getxattr(exe_path, "security.capability", (char *)caps, sizeof(caps));
 
-    if ((((caps[1] >> CAP_NET_ADMIN) & 1) != 1) || (((caps[1] >> CAP_NET_RAW) & 1) != 1))
-      forceExit(false, "To run nethogs without being root you need to enable capabilities on the program (cap_net_admin, cap_net_raw), see the documentation for details.");
+    if ((((caps[1] >> CAP_NET_ADMIN) & 1) != 1) ||
+        (((caps[1] >> CAP_NET_RAW) & 1) != 1))
+      forceExit(false, "To run nethogs without being root you need to enable "
+                       "capabilities on the program (cap_net_admin, "
+                       "cap_net_raw), see the documentation for details.");
 #else
     forceExit(false, "You need to be root to run NetHogs!");
 #endif
@@ -216,16 +233,20 @@ int main(int argc, char **argv) {
 
   char errbuf[PCAP_ERRBUF_SIZE];
 
+  int nb_devices = 0;
+  int nb_failed_devices = 0;
+
   handle *handles = NULL;
   device *current_dev = devices;
   while (current_dev != NULL) {
+    ++nb_devices;
 
     if (!getLocal(current_dev->name, tracemode)) {
       forceExit(false, "getifaddrs failed while establishing local IP.");
     }
 
     dp_handle *newhandle =
-        dp_open_live(current_dev->name, BUFSIZ, promisc, 100, errbuf);
+        dp_open_live(current_dev->name, BUFSIZ, promisc, 100, filter, errbuf);
     if (newhandle != NULL) {
       dp_addcb(newhandle, dp_packet_ip, process_ip);
       dp_addcb(newhandle, dp_packet_ip6, process_ip6);
@@ -258,9 +279,14 @@ int main(int argc, char **argv) {
     } else {
       fprintf(stderr, "Error opening handler for device %s\n",
               current_dev->name);
+      ++nb_failed_devices;
     }
 
     current_dev = current_dev->next;
+  }
+
+  if (nb_devices == nb_failed_devices) {
+    forceExit(false, "Error opening pcap handlers for all devices.\n");
   }
 
   signal(SIGINT, &quit_cb);
@@ -278,11 +304,12 @@ int main(int argc, char **argv) {
       int retval = dp_dispatch(current_handle->content, -1, (u_char *)userdata,
                                sizeof(struct dpargs));
       if (retval == -1)
-        std::cerr << "Error dispatching for device " << current_handle->devicename <<
-          ": " << dp_geterr(current_handle->content) << std::endl;
+        std::cerr << "Error dispatching for device "
+                  << current_handle->devicename << ": "
+                  << dp_geterr(current_handle->content) << std::endl;
       else if (retval < 0)
-        std::cerr << "Error dispatching for device " << current_handle->devicename <<
-          ": " << retval << std::endl;
+        std::cerr << "Error dispatching for device "
+                  << current_handle->devicename << ": " << retval << std::endl;
       else if (retval != 0)
         packets_read = true;
     }

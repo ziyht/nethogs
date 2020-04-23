@@ -20,20 +20,21 @@
  *
  */
 
-#include <sys/types.h>
 #include <cerrno>
-#include <cstring>
-#include <dirent.h>
-#include <ctype.h>
-#include <cstdlib>
-#include <iostream>
-#include <cstdio>
-#include <unistd.h>
-#include <string>
-#include <map>
-#include <sys/stat.h>
-#include <fcntl.h>
 #include <climits>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <ctype.h>
+#include <dirent.h>
+#include <fcntl.h>
+#include <iostream>
+#include <map>
+#include <sstream>
+#include <string>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 #include "inode2prog.h"
 
@@ -86,8 +87,10 @@ static std::string read_file(int fd) {
 
   for (int length; (length = read(fd, buf, sizeof(buf))) > 0;) {
     if (length < 0) {
-      std::fprintf(stderr, "Error reading file: %s\n", std::strerror(errno));
-      std::exit(34);
+      std::stringstream error;
+      error << "Error reading file:" << std::strerror(errno) << "\n";
+      std::fprintf(stderr, "%s", error.str().c_str());
+      throw error.str();
     }
     content.append(buf, length);
   }
@@ -99,18 +102,21 @@ static std::string read_file(const char *filepath) {
   int fd = open(filepath, O_RDONLY);
 
   if (fd < 0) {
-    std::fprintf(stderr, "Error opening %s: %s\n", filepath,
-                 std::strerror(errno));
-    std::exit(3);
-    return NULL;
+    std::stringstream error;
+    error << "Error opening " << filepath << ":" << std::strerror(errno)
+          << "\n";
+    std::fprintf(stderr, "%s", error.str().c_str());
+    throw error.str();
   }
 
   std::string contents = read_file(fd);
 
   if (close(fd)) {
-    std::fprintf(stderr, "Error opening %s: %s\n", filepath,
-                 std::strerror(errno));
-    std::exit(34);
+    std::stringstream error;
+    error << "Error opening " << filepath << ":" << std::strerror(errno)
+          << "\n";
+    std::fprintf(stderr, "%s", error.str().c_str());
+    throw error.str();
   }
 
   return contents;
@@ -121,9 +127,24 @@ std::string getcmdline(pid_t pid) {
   char filename[maxfilenamelen];
 
   std::snprintf(filename, maxfilenamelen, "/proc/%d/cmdline", pid);
-
+  std::string cmdline;
   bool replace_null = false;
-  std::string cmdline = read_file(filename);
+  try {
+    cmdline = read_file(filename);
+  } catch (const char *e) {
+    std::fprintf(stderr, "An exception occurred. Exception %s \n", e);
+    cmdline = "";
+  } catch (...) {
+    std::fprintf(stderr, "An exception occurred while reading cmdline.\n");
+    cmdline = "";
+  }
+
+  if (cmdline.empty() || cmdline[cmdline.length() - 1] != '\0') {
+    // invalid content of cmdline file. Add null char to allow further
+    // processing.
+    cmdline.append(1, '\0');
+    return cmdline;
+  }
 
   // join parameters, keep prgname separate, don't overwrite trailing null
   for (size_t idx = 0; idx < (cmdline.length() - 1); idx++) {
@@ -134,13 +155,6 @@ std::string getcmdline(pid_t pid) {
       replace_null = true;
     }
   }
-
-  if (cmdline.length() == 0 || (cmdline[cmdline.length() - 1] != 0x00)) {
-    // invalid content of cmdline file. Add null char to allow further
-    // processing.
-    cmdline.append("\0");
-  }
-
   return cmdline;
 }
 
